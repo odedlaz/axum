@@ -567,6 +567,89 @@ fn header_contains(headers: &HeaderMap, key: &HeaderName, value: &'static str) -
     }
 }
 
+/// Configuration for the `permessage-deflate` extension (RFC 7692).
+///
+/// Passed to the upgrade to offer compression on a route.
+/// Compression is opt-in per route rather than a default because it costs
+/// several hundred kilobytes of per-connection state, allocated eagerly in both
+/// directions when a connection negotiates it.
+///
+/// [`new`][Self::new] is the RFC's own default — a 15-bit window with context
+/// takeover in both directions. That is the most effective and the most
+/// expensive setting; the knobs below trade one for the other.
+///
+/// Setters do not validate, matching the other configuration setters on
+/// [`WebSocketUpgrade`]. A value the connection cannot honour causes the
+/// extension to be declined at negotiation time rather than advertised as a
+/// parameter that will not be respected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(docsrs, doc(cfg(feature = "ws")))]
+#[non_exhaustive]
+pub struct PerMessageDeflate {
+    max_window_bits: Option<u8>,
+    server_no_context_takeover: bool,
+    client_no_context_takeover: bool,
+    level: Option<u8>,
+}
+
+impl PerMessageDeflate {
+    /// RFC 7692's defaults: a 15-bit window, context takeover both ways.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Caps the window this server compresses with, as a base-2 logarithm.
+    ///
+    /// This is the only setting here that reduces per-connection memory, and a
+    /// server may impose it without the client agreeing: a peer whose window is
+    /// wider can always read a narrower stream. Smaller windows compress worse.
+    ///
+    /// Values outside what the build supports cause the extension to be
+    /// declined at negotiation time.
+    #[must_use]
+    pub fn max_window_bits(mut self, bits: u8) -> Self {
+        self.max_window_bits = Some(bits);
+        self
+    }
+
+    /// Stops both peers carrying the compression window between messages.
+    ///
+    /// This does **not** reduce memory — the compressor is reset rather than
+    /// freed, so the buffers stay allocated. It trades compression ratio and CPU
+    /// for independence between messages.
+    #[must_use]
+    pub fn no_context_takeover(self) -> Self {
+        self.server_no_context_takeover()
+            .client_no_context_takeover()
+    }
+
+    /// Stops this server carrying its window between messages.
+    #[must_use]
+    pub fn server_no_context_takeover(mut self) -> Self {
+        self.server_no_context_takeover = true;
+        self
+    }
+
+    /// Asks the client not to carry its window between messages.
+    #[must_use]
+    pub fn client_no_context_takeover(mut self) -> Self {
+        self.client_no_context_takeover = true;
+        self
+    }
+
+    /// How hard to compress, 0 (none) to 9 (best). Defaults to 6.
+    ///
+    /// Local to this server: it appears in no offer or response, so it needs no
+    /// agreement from the peer. Values above 9 cause the extension to be
+    /// declined at negotiation time.
+    #[must_use]
+    pub fn level(mut self, level: u8) -> Self {
+        self.level = Some(level);
+        self
+    }
+}
+
 /// A stream of WebSocket messages.
 ///
 /// See [the module level documentation](self) for more details.
@@ -1138,6 +1221,46 @@ pub mod close_code {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn per_message_deflate_defaults_to_the_rfc_defaults() {
+        // new() must be the spec default, not a conservative one: shipping
+        // no_context_takeover by default would be ~40% worse at compressing and
+        // would not save a byte, since the compressor is reset rather than freed.
+        let cfg = PerMessageDeflate::new();
+        assert_eq!(cfg, PerMessageDeflate::default());
+        assert!(!cfg.server_no_context_takeover);
+        assert!(!cfg.client_no_context_takeover);
+        assert_eq!(cfg.max_window_bits, None, "None means the RFC's 15");
+        assert_eq!(cfg.level, None, "None means flate2's default");
+    }
+
+    #[test]
+    fn per_message_deflate_builders_are_independent() {
+        let both = PerMessageDeflate::new().no_context_takeover();
+        assert!(both.server_no_context_takeover && both.client_no_context_takeover);
+
+        let server_only = PerMessageDeflate::new().server_no_context_takeover();
+        assert!(server_only.server_no_context_takeover);
+        assert!(
+            !server_only.client_no_context_takeover,
+            "asking only ourselves to reset must not ask the client to"
+        );
+
+        let client_only = PerMessageDeflate::new().client_no_context_takeover();
+        assert!(!client_only.server_no_context_takeover);
+        assert!(client_only.client_no_context_takeover);
+    }
+
+    #[test]
+    fn per_message_deflate_setters_do_not_validate() {
+        // Matching the other WebSocketUpgrade setters: infallible here, and an
+        // unhonourable value declines the extension at negotiation time rather
+        // than advertising a parameter the connection will not respect.
+        let absurd = PerMessageDeflate::new().max_window_bits(200).level(99);
+        assert_eq!(absurd.max_window_bits, Some(200));
+        assert_eq!(absurd.level, Some(99));
+    }
+
     use std::future::ready;
 
     use super::*;
