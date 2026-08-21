@@ -728,10 +728,16 @@ impl PerMessageDeflate {
 /// Decides the `permessage-deflate` response to a client's offers.
 ///
 /// Returns the configuration to run and the header value to echo, or `None` to
-/// decline. Declining is an ordinary outcome rather than an error: a client that
-/// offered nothing, an offer carrying a parameter RFC 7692 does not define, and
-/// an offer this build cannot honour all end here, and all mean an uncompressed
-/// connection.
+/// decline. Declining is an ordinary outcome rather than an error, and every
+/// route to it ends in an uncompressed connection:
+///
+/// - the local [`PerMessageDeflate`] is unusable, such as a compression level
+///   the backend rejects;
+/// - the offered header does not parse — see [`SecWebsocketExtensions`], which
+///   is permissive and rejects only an extension with an empty name;
+/// - no offer names `permessage-deflate`;
+/// - every offer for it carries a parameter RFC 7692 does not define;
+/// - every offer for it asks for a configuration this build cannot honour.
 #[cfg(feature = "ws-deflate")]
 fn negotiate_deflate(
     requested: PerMessageDeflate,
