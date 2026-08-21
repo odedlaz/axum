@@ -140,6 +140,13 @@ pub struct WebSocketUpgrade<F = DefaultOnFailedUpgrade> {
     on_upgrade: hyper::upgrade::OnUpgrade,
     on_failed_upgrade: F,
     sec_websocket_protocol: BTreeSet<HeaderValue>,
+    /// The raw `Sec-WebSocket-Extensions` request header values.
+    ///
+    /// Kept raw rather than split on `,` the way `sec_websocket_protocol` is:
+    /// an extension parameter value may be a `quoted-string` containing a comma
+    /// or a semicolon (RFC 6455 section 9.1), so a naive split changes the
+    /// grammar's meaning. Parsing belongs to whatever understands that grammar.
+    sec_websocket_extensions: Vec<HeaderValue>,
 }
 
 impl<F> std::fmt::Debug for WebSocketUpgrade<F> {
@@ -149,6 +156,7 @@ impl<F> std::fmt::Debug for WebSocketUpgrade<F> {
             .field("protocol", &self.protocol)
             .field("sec_websocket_key", &self.sec_websocket_key)
             .field("sec_websocket_protocol", &self.sec_websocket_protocol)
+            .field("sec_websocket_extensions", &self.sec_websocket_extensions)
             .finish_non_exhaustive()
     }
 }
@@ -279,6 +287,20 @@ impl<F> WebSocketUpgrade<F> {
         self.sec_websocket_protocol.iter()
     }
 
+    /// The raw `Sec-WebSocket-Extensions` values the client offered.
+    ///
+    /// Returned unparsed, one item per header line. An extension parameter value
+    /// may be a `quoted-string` containing `,` or `;` (RFC 6455 section 9.1), so
+    /// splitting these without a grammar-aware parser changes their meaning.
+    ///
+    /// Offered for inspection and logging. Answering an offer is a separate
+    /// concern: negotiating and configuring the codec have to happen together,
+    /// or a response header can promise a transform the connection will not
+    /// perform.
+    pub fn requested_extensions(&self) -> impl Iterator<Item = &HeaderValue> {
+        self.sec_websocket_extensions.iter()
+    }
+
     /// Set the chosen WebSocket subprotocol.
     ///
     /// Another method, [`protocols()`][Self::protocols], also sets the chosen WebSocket
@@ -337,6 +359,7 @@ impl<F> WebSocketUpgrade<F> {
             on_upgrade: self.on_upgrade,
             on_failed_upgrade: callback,
             sec_websocket_protocol: self.sec_websocket_protocol,
+            sec_websocket_extensions: self.sec_websocket_extensions,
         }
     }
 
@@ -494,6 +517,13 @@ where
             .remove::<hyper::upgrade::OnUpgrade>()
             .ok_or(ConnectionNotUpgradable)?;
 
+        let sec_websocket_extensions = parts
+            .headers
+            .get_all(header::SEC_WEBSOCKET_EXTENSIONS)
+            .iter()
+            .cloned()
+            .collect();
+
         let sec_websocket_protocol = parts
             .headers
             .get_all(header::SEC_WEBSOCKET_PROTOCOL)
@@ -511,6 +541,7 @@ where
             sec_websocket_key,
             on_upgrade,
             sec_websocket_protocol,
+            sec_websocket_extensions,
             on_failed_upgrade: DefaultOnFailedUpgrade,
         })
     }
