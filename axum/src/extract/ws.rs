@@ -329,20 +329,6 @@ impl<F> WebSocketUpgrade<F> {
         self.sec_websocket_protocol.iter()
     }
 
-    /// The raw `Sec-WebSocket-Extensions` values the client offered.
-    ///
-    /// Returned unparsed, one item per header line. An extension parameter value
-    /// may be a `quoted-string` containing `,` or `;` (RFC 6455 section 9.1), so
-    /// splitting these without a grammar-aware parser changes their meaning.
-    ///
-    /// Offered for inspection and logging. Answering an offer is a separate
-    /// concern: negotiating and configuring the codec have to happen together,
-    /// or a response header can promise a transform the connection will not
-    /// perform.
-    pub fn requested_extensions(&self) -> impl Iterator<Item = &HeaderValue> {
-        self.sec_websocket_extensions.iter()
-    }
-
     /// Set the chosen WebSocket subprotocol.
     ///
     /// Another method, [`protocols()`][Self::protocols], also sets the chosen WebSocket
