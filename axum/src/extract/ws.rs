@@ -760,7 +760,7 @@ fn negotiate_deflate(
     // RFC 7692 section 5.
     offers
         .iter()
-        .filter(|offer| offer.name() == EXTENSION_NAME)
+        .filter(|offer| offer.name().eq_ignore_ascii_case(EXTENSION_NAME))
         .filter_map(|offer| PermessageDeflateConfig::parse_params(offer.params()).ok())
         .find_map(|offer| ours.accept_offer(offer))
         .map(|(config, echo)| {
@@ -1631,6 +1631,72 @@ mod tests {
 
         assert!(config.server_no_context_takeover, "took the second offer");
         assert_eq!(response, "permessage-deflate; server_no_context_takeover");
+    }
+
+    /// Ported from the module this replaces, which matched both the extension
+    /// name and its parameter names case-insensitively. Only the name half
+    /// survives here: `parse_params` compares parameter names exactly, so the
+    /// second assertion records a real loss rather than a decision.
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn the_extension_name_is_matched_case_insensitively() {
+        let offered = [HeaderValue::from_static("PerMessage-Deflate")];
+        assert!(negotiate_deflate(PerMessageDeflate::new(), &offered).is_some());
+
+        let cased = [HeaderValue::from_static(
+            "permessage-deflate; Server_No_Context_Takeover",
+        )];
+        assert!(
+            negotiate_deflate(PerMessageDeflate::new(), &cased).is_none(),
+            "parameter names are still compared exactly; fixing that upstream \
+             turns this assertion into a failure, which is the point"
+        );
+    }
+
+    /// An extension we know nothing about must not take the deflate offer down
+    /// with it, and an offer list without deflate must not be an error.
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn other_extensions_are_skipped_not_fatal() {
+        let with_deflate =
+            [HeaderValue::from_static("x-other-extension, permessage-deflate")];
+        assert_eq!(
+            negotiate_deflate(PerMessageDeflate::new(), &with_deflate)
+                .expect("the deflate offer is still there")
+                .1,
+            "permessage-deflate"
+        );
+
+        let without = [HeaderValue::from_static("x-other-extension")];
+        assert!(negotiate_deflate(PerMessageDeflate::new(), &without).is_none());
+    }
+
+    /// What Chrome and Firefox actually send.
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn the_valueless_client_window_form_is_accepted_and_not_echoed() {
+        let offered = [HeaderValue::from_static(
+            "permessage-deflate; client_max_window_bits",
+        )];
+        let (config, response) =
+            negotiate_deflate(PerMessageDeflate::new(), &offered).expect("browsers must work");
+        assert_eq!(response, "permessage-deflate");
+        assert_eq!(config.client_max_window_bits().get(), 15, "nothing to narrow");
+    }
+
+    /// A *valued* offer is echoed, and the echo is honoured -- the module this
+    /// replaces dropped the parameter instead, giving up the client-side window
+    /// reduction the client had asked for.
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn a_valued_client_window_is_echoed_and_configured() {
+        let offered = [HeaderValue::from_static(
+            "permessage-deflate; client_max_window_bits=10",
+        )];
+        let (config, response) = negotiate_deflate(PerMessageDeflate::new(), &offered).unwrap();
+        assert_eq!(response, "permessage-deflate; client_max_window_bits=10");
+        assert_eq!(config.client_max_window_bits().get(), 10);
+        assert_eq!(config.server_max_window_bits().get(), 15, "ours is untouched");
     }
 
     #[cfg(feature = "ws-deflate")]
