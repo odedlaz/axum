@@ -36,6 +36,7 @@ tokio = ["dep:hyper-util", "dep:tokio", "tokio/net", "tokio/rt", "tower/make", "
 tower-log = ["tower/log"]
 tracing = ["dep:tracing", "axum-core/tracing"]
 ws = ["dep:hyper", "tokio", "dep:tokio-tungstenite", "dep:sha1", "dep:base64"]
+ws-deflate = ["ws", "dep:tungstenite", "tungstenite/deflate"]
 
 __private_docs = [
     # We re-export some docs from axum-core via #[doc(inline)],
@@ -84,6 +85,10 @@ serde_urlencoded = { version = "0.7", optional = true }
 sha1 = { version = "0.10", optional = true }
 tokio = { package = "tokio", version = "1.44", features = ["time"], optional = true }
 tokio-tungstenite = { version = "0.30.0", optional = true }
+# Named directly only to reach the `deflate` feature: tokio-tungstenite has no
+# passthrough for it, and this is the same crate it depends on, so the feature
+# unifies. The deflate types are used from here too.
+tungstenite = { version = "0.30.0", optional = true }
 tracing = { version = "0.1", default-features = false, optional = true }
 
 # doc dependencies

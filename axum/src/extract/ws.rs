@@ -120,6 +120,11 @@ use tokio_tungstenite::{
     },
     WebSocketStream,
 };
+#[cfg(feature = "ws-deflate")]
+use tungstenite::extensions::{
+    compression::deflate::{DeflateConfig, PermessageDeflateConfig, EXTENSION_NAME},
+    headers::sec_websocket_extensions::{SecWebsocketExtensions, WebsocketProtocolExtension},
+};
 
 /// Extractor for establishing WebSocket connections.
 ///
@@ -148,17 +153,22 @@ pub struct WebSocketUpgrade<F = DefaultOnFailedUpgrade> {
     /// or a semicolon (RFC 6455 section 9.1), so a naive split changes the
     /// grammar's meaning. Parsing belongs to whatever understands that grammar.
     sec_websocket_extensions: Vec<HeaderValue>,
+    #[cfg(feature = "ws-deflate")]
+    compression: Option<PerMessageDeflate>,
 }
 
 impl<F> std::fmt::Debug for WebSocketUpgrade<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WebSocketUpgrade")
+        let mut debug = f.debug_struct("WebSocketUpgrade");
+        debug
             .field("config", &self.config)
             .field("protocol", &self.protocol)
             .field("sec_websocket_key", &self.sec_websocket_key)
             .field("sec_websocket_protocol", &self.sec_websocket_protocol)
-            .field("sec_websocket_extensions", &self.sec_websocket_extensions)
-            .finish_non_exhaustive()
+            .field("sec_websocket_extensions", &self.sec_websocket_extensions);
+        #[cfg(feature = "ws-deflate")]
+        debug.field("compression", &self.compression);
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -214,6 +224,38 @@ impl<F> WebSocketUpgrade<F> {
     /// Allow server to accept unmasked frames (defaults to false)
     pub fn accept_unmasked_frames(mut self, accept: bool) -> Self {
         self.config.accept_unmasked_frames = accept;
+        self
+    }
+
+    /// Offer to compress messages with `permessage-deflate` (RFC 7692).
+    ///
+    /// Compression is per message and transparent to [`WebSocket`]: what you
+    /// send and receive is uncompressed either way. The extension is negotiated
+    /// when the response is built, so a client that offers nothing, or offers
+    /// only settings this build cannot honour, simply gets an uncompressed
+    /// connection — there is no error to handle.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use axum::{
+    ///     extract::{ws::WebSocket, PerMessageDeflate, WebSocketUpgrade},
+    ///     response::Response,
+    /// };
+    ///
+    /// async fn handler(ws: WebSocketUpgrade) -> Response {
+    ///     ws.compression(PerMessageDeflate::new().max_window_bits(13))
+    ///         .on_upgrade(handle_socket)
+    /// }
+    ///
+    /// async fn handle_socket(socket: WebSocket) {
+    ///     // Messages arrive decompressed.
+    /// }
+    /// ```
+    #[cfg(feature = "ws-deflate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "ws-deflate")))]
+    pub fn compression(mut self, config: PerMessageDeflate) -> Self {
+        self.compression = Some(config);
         self
     }
 
@@ -361,6 +403,8 @@ impl<F> WebSocketUpgrade<F> {
             on_failed_upgrade: callback,
             sec_websocket_protocol: self.sec_websocket_protocol,
             sec_websocket_extensions: self.sec_websocket_extensions,
+            #[cfg(feature = "ws-deflate")]
+            compression: self.compression,
         }
     }
 
@@ -374,8 +418,24 @@ impl<F> WebSocketUpgrade<F> {
         F: OnFailedUpgrade,
     {
         let on_upgrade = self.on_upgrade;
-        let config = self.config;
         let on_failed_upgrade = self.on_failed_upgrade;
+
+        #[cfg(not(feature = "ws-deflate"))]
+        let config = self.config;
+        #[cfg(feature = "ws-deflate")]
+        let (config, deflate_response) = match self
+            .compression
+            .and_then(|requested| negotiate_deflate(requested, &self.sec_websocket_extensions))
+        {
+            Some((deflate, response)) => {
+                // `WebSocketConfig` is `non_exhaustive`, so this cannot be a
+                // struct update expression from outside tungstenite.
+                let mut config = self.config;
+                config.extensions.permessage_deflate = Some(deflate);
+                (config, Some(response))
+            }
+            None => (self.config, None),
+        };
 
         let protocol = self.protocol.clone();
 
@@ -428,6 +488,13 @@ impl<F> WebSocketUpgrade<F> {
             response
                 .headers_mut()
                 .insert(header::SEC_WEBSOCKET_PROTOCOL, protocol);
+        }
+
+        #[cfg(feature = "ws-deflate")]
+        if let Some(extensions) = deflate_response {
+            response
+                .headers_mut()
+                .insert(header::SEC_WEBSOCKET_EXTENSIONS, extensions);
         }
 
         response
@@ -544,6 +611,8 @@ where
             sec_websocket_protocol,
             sec_websocket_extensions,
             on_failed_upgrade: DefaultOnFailedUpgrade,
+            #[cfg(feature = "ws-deflate")]
+            compression: None,
         })
     }
 }
@@ -586,7 +655,8 @@ fn header_contains(headers: &HeaderMap, key: HeaderName, value: &'static str) ->
 /// extension to be declined at negotiation time rather than advertised as a
 /// parameter that will not be respected.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(docsrs, doc(cfg(feature = "ws")))]
+#[cfg(feature = "ws-deflate")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ws-deflate")))]
 #[non_exhaustive]
 pub struct PerMessageDeflate {
     max_window_bits: Option<u8>,
@@ -595,6 +665,7 @@ pub struct PerMessageDeflate {
     level: Option<u8>,
 }
 
+#[cfg(feature = "ws-deflate")]
 impl PerMessageDeflate {
     /// RFC 7692's defaults: a 15-bit window, context takeover both ways.
     #[must_use]
@@ -651,6 +722,56 @@ impl PerMessageDeflate {
         self.level = Some(level);
         self
     }
+
+    /// Translates into tungstenite's server configuration, or `None` if a value
+    /// set here is one this build cannot honour.
+    fn into_deflate_config(self) -> Option<DeflateConfig> {
+        let takeover = DeflateConfig::new()
+            .set_no_context_takeover(protocol::Role::Server, self.server_no_context_takeover)
+            .set_no_context_takeover(protocol::Role::Client, self.client_no_context_takeover);
+        let windowed = match self.max_window_bits {
+            Some(bits) => takeover
+                .set_max_window_bits(protocol::Role::Server, bits)
+                .ok()?,
+            None => takeover,
+        };
+        match self.level {
+            Some(level) => windowed.set_compression_level(level.into()).ok(),
+            None => Some(windowed),
+        }
+    }
+}
+
+/// Decides the `permessage-deflate` response to a client's offers.
+///
+/// Returns the configuration to run and the header value to echo, or `None` to
+/// decline. Declining is an ordinary outcome rather than an error: a client that
+/// offered nothing, an offer carrying a parameter RFC 7692 does not define, and
+/// an offer this build cannot honour all end here, and all mean an uncompressed
+/// connection.
+#[cfg(feature = "ws-deflate")]
+fn negotiate_deflate(
+    requested: PerMessageDeflate,
+    offered: &[HeaderValue],
+) -> Option<(DeflateConfig, HeaderValue)> {
+    let ours = requested.into_deflate_config()?;
+    let offers = SecWebsocketExtensions::from_header_values(offered.iter()).ok()?;
+
+    // Offers arrive in the client's order of preference, and one client may offer
+    // the same extension several times with different parameters, so take the
+    // first offer that is acceptable rather than the first that is named.
+    // RFC 7692 section 5.
+    offers
+        .iter()
+        .filter(|offer| offer.name() == EXTENSION_NAME)
+        .filter_map(|offer| PermessageDeflateConfig::parse_params(offer.params()).ok())
+        .find_map(|offer| ours.accept_offer(offer))
+        .map(|(config, echo)| {
+            // Infallible in practice: every parameter here is a token this crate
+            // chose and a small integer.
+            let response = SecWebsocketExtensions::new([WebsocketProtocolExtension::from(echo)]);
+            (config, response.header_value())
+        })
 }
 
 /// A stream of WebSocket messages.
@@ -1213,6 +1334,7 @@ pub mod close_code {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "ws-deflate")]
     #[test]
     fn per_message_deflate_defaults_to_the_rfc_defaults() {
         // new() must be the spec default, not a conservative one: shipping
@@ -1226,6 +1348,7 @@ mod tests {
         assert_eq!(cfg.level, None, "None means flate2's default");
     }
 
+    #[cfg(feature = "ws-deflate")]
     #[test]
     fn per_message_deflate_builders_are_independent() {
         let both = PerMessageDeflate::new().no_context_takeover();
@@ -1243,6 +1366,7 @@ mod tests {
         assert!(client_only.client_no_context_takeover);
     }
 
+    #[cfg(feature = "ws-deflate")]
     #[test]
     fn per_message_deflate_setters_do_not_validate() {
         // Matching the other WebSocketUpgrade setters: infallible here, and an
@@ -1389,6 +1513,126 @@ mod tests {
     }
 
     const TEST_ECHO_APP_REQ_SUBPROTO: &str = "echo3, echo";
+    #[cfg(feature = "ws-deflate")]
+    fn deflate_echo_app(config: PerMessageDeflate) -> Router {
+        async fn handle_socket(mut socket: WebSocket) {
+            while let Some(Ok(msg)) = socket.recv().await {
+                if matches!(msg, Message::Text(_) | Message::Binary(_))
+                    && socket.send(msg).await.is_err()
+                {
+                    break;
+                }
+            }
+        }
+
+        Router::new().route(
+            "/echo",
+            any(move |ws: WebSocketUpgrade| {
+                ready(ws.compression(config).on_upgrade(handle_socket))
+            }),
+        )
+    }
+
+    /// A client that offers the extension and can decode it, so a message only
+    /// round-trips if both sides agreed on the same thing.
+    #[cfg(feature = "ws-deflate")]
+    #[crate::test]
+    async fn deflate_is_negotiated_and_messages_round_trip() {
+        let addr = spawn_service(deflate_echo_app(PerMessageDeflate::new()));
+        let uri: http::Uri = format!("ws://{addr}/echo").try_into().unwrap();
+
+        let mut client = WebSocketConfig::default();
+        client.extensions.permessage_deflate = Some(Default::default());
+        let (mut socket, response) = tokio_tungstenite::connect_async_with_config(
+            tungstenite::client::ClientRequestBuilder::new(uri),
+            Some(client),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response.headers()[http::header::SEC_WEBSOCKET_EXTENSIONS],
+            "permessage-deflate"
+        );
+
+        // Long enough to actually compress, so a broken agreement shows up as a
+        // decode failure rather than passing on a payload deflate would skip.
+        let input = tungstenite::Message::Text("compress me ".repeat(64).into());
+        socket.send(input.clone()).await.unwrap();
+        assert_eq!(socket.next().await.unwrap().unwrap(), input);
+    }
+
+    #[cfg(feature = "ws-deflate")]
+    #[crate::test]
+    async fn no_response_header_when_the_client_does_not_offer() {
+        let addr = spawn_service(deflate_echo_app(PerMessageDeflate::new()));
+        let uri: http::Uri = format!("ws://{addr}/echo").try_into().unwrap();
+        let (mut socket, response) = tokio_tungstenite::connect_async(
+            tungstenite::client::ClientRequestBuilder::new(uri),
+        )
+        .await
+        .unwrap();
+
+        assert!(!response
+            .headers()
+            .contains_key(http::header::SEC_WEBSOCKET_EXTENSIONS));
+
+        let input = tungstenite::Message::Text("uncompressed".into());
+        socket.send(input.clone()).await.unwrap();
+        assert_eq!(socket.next().await.unwrap().unwrap(), input);
+    }
+
+    /// Declining must be silent and must not break the connection: the client
+    /// asks for a window this build cannot use, and still gets a working socket.
+    #[cfg(feature = "ws-deflate")]
+    #[crate::test]
+    async fn an_unhonourable_offer_is_declined_not_rejected() {
+        let addr = spawn_service(deflate_echo_app(PerMessageDeflate::new()));
+        let uri: http::Uri = format!("ws://{addr}/echo").try_into().unwrap();
+        let (mut socket, response) = tokio_tungstenite::connect_async(
+            tungstenite::client::ClientRequestBuilder::new(uri).with_header(
+                "sec-websocket-extensions",
+                "permessage-deflate; server_max_window_bits=6",
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(!response
+            .headers()
+            .contains_key(http::header::SEC_WEBSOCKET_EXTENSIONS));
+
+        let input = tungstenite::Message::Text("still works".into());
+        socket.send(input.clone()).await.unwrap();
+        assert_eq!(socket.next().await.unwrap().unwrap(), input);
+    }
+
+    /// RFC 7692 section 5: offers are in the client's preference order and may
+    /// repeat the extension, so the first *acceptable* one wins -- not the first
+    /// one named.
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn the_first_acceptable_offer_wins_not_the_first_named() {
+        let offered = [HeaderValue::from_static(
+            "permessage-deflate; server_max_window_bits=6, \
+             permessage-deflate; server_no_context_takeover",
+        )];
+        let (config, response) =
+            negotiate_deflate(PerMessageDeflate::new(), &offered).expect("second offer is fine");
+
+        assert!(config.server_no_context_takeover, "took the second offer");
+        assert_eq!(response, "permessage-deflate; server_no_context_takeover");
+    }
+
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn a_level_the_backend_rejects_declines_the_extension() {
+        let offered = [HeaderValue::from_static("permessage-deflate")];
+        assert!(negotiate_deflate(PerMessageDeflate::new().level(99), &offered).is_none());
+        assert!(negotiate_deflate(PerMessageDeflate::new().level(9), &offered).is_some());
+    }
+
     async fn test_echo_app<S: AsyncRead + AsyncWrite + Unpin>(
         mut socket: WebSocketStream<S>,
         headers: &http::HeaderMap,
