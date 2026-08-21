@@ -760,7 +760,7 @@ fn negotiate_deflate(
     // RFC 7692 section 5.
     offers
         .iter()
-        .filter(|offer| offer.name().eq_ignore_ascii_case(EXTENSION_NAME))
+        .filter(|offer| offer.name() == EXTENSION_NAME)
         .filter_map(|offer| PermessageDeflateConfig::parse_params(offer.params()).ok())
         .find_map(|offer| ours.accept_offer(offer))
         .map(|(config, echo)| {
@@ -1633,24 +1633,35 @@ mod tests {
         assert_eq!(response, "permessage-deflate; server_no_context_takeover");
     }
 
-    /// Ported from the module this replaces, which matched both the extension
-    /// name and its parameter names case-insensitively. Only the name half
-    /// survives here: `parse_params` compares parameter names exactly, so the
-    /// second assertion records a real loss rather than a decision.
+    /// Names are compared exactly, and that is deliberate.
+    ///
+    /// The relay module this replaces folded case on both the extension name and
+    /// its parameter names. Neither RFC 6455 section 9.1 nor RFC 7692 section 7
+    /// says how these are compared — checked, not assumed — so the leniency was
+    /// unsourced, and tungstenite's parameter parser is exact. Being lenient
+    /// about the name while it is strict about the parameters is the one
+    /// combination that is indefensible either way.
+    ///
+    /// Every client sends lowercase, so nothing observable changes.
     #[cfg(feature = "ws-deflate")]
     #[test]
-    fn the_extension_name_is_matched_case_insensitively() {
-        let offered = [HeaderValue::from_static("PerMessage-Deflate")];
-        assert!(negotiate_deflate(PerMessageDeflate::new(), &offered).is_some());
-
-        let cased = [HeaderValue::from_static(
+    fn names_are_compared_exactly() {
+        for cased in [
+            "PerMessage-Deflate",
             "permessage-deflate; Server_No_Context_Takeover",
+        ] {
+            let offered = [HeaderValue::from_str(cased).unwrap()];
+            assert!(
+                negotiate_deflate(PerMessageDeflate::new(), &offered).is_none(),
+                "{cased} must not negotiate"
+            );
+        }
+        let exact = [HeaderValue::from_static(
+            "permessage-deflate; server_no_context_takeover",
         )];
-        assert!(
-            negotiate_deflate(PerMessageDeflate::new(), &cased).is_none(),
-            "parameter names are still compared exactly; fixing that upstream \
-             turns this assertion into a failure, which is the point"
-        );
+        let (config, _) = negotiate_deflate(PerMessageDeflate::new(), &exact)
+            .expect("the control must negotiate, or this test proves nothing");
+        assert!(config.server_no_context_takeover);
     }
 
     /// An extension we know nothing about must not take the deflate offer down
