@@ -5831,7 +5831,7 @@ dependencies = [
 [[package]]
 name = "tungstenite"
 version = "0.30.0"
-source = "git+https://github.com/odedlaz/tungstenite-rs?branch=permessage-deflate#30586bdde1a298ba69c07c69cb6df30b0685c46f"
+source = "git+https://github.com/odedlaz/tungstenite-rs?branch=permessage-deflate-series#d2b348fbd981e8a96e09a98671e6a0998e9ac951"
 dependencies = [
  "bytes",
  "data-encoding",
