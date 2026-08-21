@@ -84,6 +84,7 @@ ws = [
     "dep:sha1",
     "dep:base64",
 ]
+ws-deflate = ["ws", "dep:tungstenite", "tungstenite/deflate"]
 
 __private_docs = [
     # We re-export some docs from axum-core via #[doc(inline)],
@@ -139,6 +140,10 @@ serde_json = { version = "1.0.29", features = ["raw_value"], optional = true }
 serde_path_to_error = { version = "0.1.8", optional = true }
 sha1 = { version = "0.10", optional = true }
 tokio-tungstenite = { version = "0.30.0", optional = true }
+# Named directly only to reach the `deflate` feature: tokio-tungstenite has no
+# passthrough for it, and this is the same crate it depends on, so the feature
+# unifies. The deflate types are used from here too.
+tungstenite = { version = "0.30.0", optional = true }
 tracing = { version = "0.1", default-features = false, optional = true }
 
 # doc dependencies
