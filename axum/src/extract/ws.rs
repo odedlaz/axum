@@ -1598,6 +1598,41 @@ mod tests {
         );
     }
 
+    /// One obs-text byte anywhere in the header value discards every offer in it,
+    /// including a well-formed `permessage-deflate` alongside.
+    ///
+    /// `HeaderValue` legitimately carries bytes that are not UTF-8, and
+    /// tungstenite's CHANGELOG for 0.29.0 advertises exactly that: "allow users
+    /// to send headers with non-visible ASCII values". The classifier calls
+    /// `to_str()` on the whole value, so one such byte in an *unrelated*
+    /// extension silently takes the deflate offer down with it -- the same
+    /// isolation property that is already pinned for malformed-but-UTF-8 input.
+    ///
+    /// Asserts the current behaviour, which is wrong. When the classifier moves
+    /// to `as_bytes()` this flips to `is_some()` and the mutation that proves it
+    /// is restoring the `to_str()` guard.
+    #[cfg(feature = "ws-deflate")]
+    #[test]
+    fn obs_text_in_an_unrelated_extension_currently_discards_a_clean_deflate_offer() {
+        // A clean offer on its own negotiates -- the control, without which this
+        // test cannot distinguish "obs-text broke it" from "nothing negotiates".
+        let clean = [HeaderValue::from_static("x-other; q=1, permessage-deflate")];
+        assert_eq!(
+            negotiate(PerMessageDeflate::new(), &clean).expect("the control must negotiate"),
+            "permessage-deflate"
+        );
+
+        // The same list, with one non-UTF-8 byte in the unrelated extension.
+        let obs = [
+            HeaderValue::from_bytes(b"x-other; q=\x80, permessage-deflate")
+                .expect("a valid HeaderValue -- obs-text is legal here"),
+        ];
+        assert!(
+            negotiate(PerMessageDeflate::new(), &obs).is_none(),
+            "documents the defect: the clean deflate offer beside it is discarded"
+        );
+    }
+
     /// Names are compared case-insensitively, on the extension and on its
     /// parameters alike.
     ///
