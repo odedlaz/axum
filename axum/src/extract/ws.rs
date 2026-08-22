@@ -120,11 +120,6 @@ use tokio_tungstenite::{
     },
     WebSocketStream,
 };
-#[cfg(feature = "ws-deflate")]
-use tungstenite::extensions::{
-    compression::deflate::{DeflateConfig, PermessageDeflateConfig, EXTENSION_NAME},
-    headers::sec_websocket_extensions::{SecWebsocketExtensions, WebsocketProtocolExtension},
-};
 
 /// Extractor for establishing WebSocket connections.
 ///
@@ -411,15 +406,15 @@ impl<F> WebSocketUpgrade<F> {
         #[cfg(feature = "ws-deflate")]
         let (config, deflate_response) = match self
             .compression
-            .and_then(|requested| negotiate_deflate(requested, &self.sec_websocket_extensions))
+            .and_then(|requested| requested.configure(self.config))
         {
-            Some((deflate, response)) => {
-                // `WebSocketConfig` is `non_exhaustive`, so this cannot be a
-                // struct update expression from outside tungstenite.
-                let mut config = self.config;
-                config.extensions.permessage_deflate = Some(deflate);
-                (config, Some(response))
-            }
+            // Parsing the offers, choosing among them and rendering the
+            // response now belong to tungstenite. The returned config is
+            // always socket-ready: on decline it carries compression
+            // disabled and the header is `None`, so there is no state where
+            // this hands a policy-bearing config to a raw socket without
+            // having sent the matching response header.
+            Some(configured) => configured.accept_deflate_offers(&self.sec_websocket_extensions),
             None => (self.config, None),
         };
 
@@ -709,61 +704,35 @@ impl PerMessageDeflate {
         self
     }
 
-    /// Translates into tungstenite's server configuration, or `None` if a value
-    /// set here is one this build cannot honour.
-    fn into_deflate_config(self) -> Option<DeflateConfig> {
-        let takeover = DeflateConfig::new()
-            .set_no_context_takeover(protocol::Role::Server, self.server_no_context_takeover)
-            .set_no_context_takeover(protocol::Role::Client, self.client_no_context_takeover);
-        let windowed = match self.max_window_bits {
-            Some(bits) => takeover
-                .set_max_window_bits(protocol::Role::Server, bits)
-                .ok()?,
-            None => takeover,
-        };
-        match self.level {
-            Some(level) => windowed.set_compression_level(level.into()).ok(),
-            None => Some(windowed),
+    /// Applies this route's policy to `config`, or `None` if a value set here is
+    /// one this build cannot honour.
+    ///
+    /// The range checks are here rather than left to tungstenite because its
+    /// builders panic on out-of-range programmer input, while these values
+    /// arrive from a route definition and are therefore data. An invalid one
+    /// declines compression, which is what this method returning `None` has
+    /// always meant.
+    fn configure(self, config: WebSocketConfig) -> Option<WebSocketConfig> {
+        if self
+            .max_window_bits
+            .is_some_and(|bits| !(9..=15).contains(&bits))
+            || self.level.is_some_and(|level| level > 9)
+        {
+            return None;
         }
+
+        let mut config = config
+            .enable_deflate()
+            .deflate_no_context_takeover(protocol::Role::Server, self.server_no_context_takeover)
+            .deflate_no_context_takeover(protocol::Role::Client, self.client_no_context_takeover);
+        if let Some(bits) = self.max_window_bits {
+            config = config.deflate_max_window_bits(protocol::Role::Server, bits);
+        }
+        if let Some(level) = self.level {
+            config = config.deflate_compression_level(level.into());
+        }
+        Some(config)
     }
-}
-
-/// Decides the `permessage-deflate` response to a client's offers.
-///
-/// Returns the configuration to run and the header value to echo, or `None` to
-/// decline. Declining is an ordinary outcome rather than an error, and every
-/// route to it ends in an uncompressed connection:
-///
-/// - the local [`PerMessageDeflate`] is unusable, such as a compression level
-///   the backend rejects;
-/// - the offered header does not parse — see [`SecWebsocketExtensions`], which
-///   is permissive and rejects only an extension with an empty name;
-/// - no offer names `permessage-deflate`;
-/// - every offer for it carries a parameter RFC 7692 does not define;
-/// - every offer for it asks for a configuration this build cannot honour.
-#[cfg(feature = "ws-deflate")]
-fn negotiate_deflate(
-    requested: PerMessageDeflate,
-    offered: &[HeaderValue],
-) -> Option<(DeflateConfig, HeaderValue)> {
-    let ours = requested.into_deflate_config()?;
-    let offers = SecWebsocketExtensions::from_header_values(offered.iter()).ok()?;
-
-    // Offers arrive in the client's order of preference, and one client may offer
-    // the same extension several times with different parameters, so take the
-    // first offer that is acceptable rather than the first that is named.
-    // RFC 7692 section 5.
-    offers
-        .iter()
-        .filter(|offer| offer.name() == EXTENSION_NAME)
-        .filter_map(|offer| PermessageDeflateConfig::parse_params(offer.params()).ok())
-        .find_map(|offer| ours.accept_offer(offer))
-        .map(|(config, echo)| {
-            // Infallible in practice: every parameter here is a token this crate
-            // chose and a small integer.
-            let response = SecWebsocketExtensions::new([WebsocketProtocolExtension::from(echo)]);
-            (config, response.header_value())
-        })
 }
 
 /// A stream of WebSocket messages.
@@ -1533,8 +1502,8 @@ mod tests {
         let addr = spawn_service(deflate_echo_app(PerMessageDeflate::new()));
         let uri: http::Uri = format!("ws://{addr}/echo").try_into().unwrap();
 
-        let mut client = WebSocketConfig::default();
-        client.extensions.permessage_deflate = Some(Default::default());
+        let client = WebSocketConfig::default();
+        let client = client.enable_deflate();
         let (mut socket, response) = tokio_tungstenite::connect_async_with_config(
             tungstenite::client::ClientRequestBuilder::new(uri),
             Some(client),
@@ -1560,11 +1529,10 @@ mod tests {
     async fn no_response_header_when_the_client_does_not_offer() {
         let addr = spawn_service(deflate_echo_app(PerMessageDeflate::new()));
         let uri: http::Uri = format!("ws://{addr}/echo").try_into().unwrap();
-        let (mut socket, response) = tokio_tungstenite::connect_async(
-            tungstenite::client::ClientRequestBuilder::new(uri),
-        )
-        .await
-        .unwrap();
+        let (mut socket, response) =
+            tokio_tungstenite::connect_async(tungstenite::client::ClientRequestBuilder::new(uri))
+                .await
+                .unwrap();
 
         assert!(!response
             .headers()
@@ -1600,6 +1568,19 @@ mod tests {
         assert_eq!(socket.next().await.unwrap().unwrap(), input);
     }
 
+    /// Mirrors what `on_upgrade` does, so these tests exercise the real path:
+    /// apply the route policy, then let tungstenite parse, choose and render.
+    ///
+    /// Returns just the response header. The negotiated settings are private to
+    /// tungstenite now, and the header is the only part a peer can see -- which
+    /// is the right thing to assert on anyway.
+    #[cfg(feature = "ws-deflate")]
+    fn negotiate(requested: PerMessageDeflate, offered: &[HeaderValue]) -> Option<HeaderValue> {
+        requested
+            .configure(WebSocketConfig::default())
+            .and_then(|configured| configured.accept_deflate_offers(offered).1)
+    }
+
     /// RFC 7692 section 5: offers are in the client's preference order and may
     /// repeat the extension, so the first *acceptable* one wins -- not the first
     /// one named.
@@ -1610,42 +1591,49 @@ mod tests {
             "permessage-deflate; server_max_window_bits=6, \
              permessage-deflate; server_no_context_takeover",
         )];
-        let (config, response) =
-            negotiate_deflate(PerMessageDeflate::new(), &offered).expect("second offer is fine");
-
-        assert!(config.server_no_context_takeover, "took the second offer");
-        assert_eq!(response, "permessage-deflate; server_no_context_takeover");
+        let response = negotiate(PerMessageDeflate::new(), &offered).expect("second offer is fine");
+        assert_eq!(
+            response, "permessage-deflate; server_no_context_takeover",
+            "the echo names the second offer, so that is the one taken"
+        );
     }
 
-    /// Names are compared exactly, and that is deliberate.
+    /// Names are compared case-insensitively, on the extension and on its
+    /// parameters alike.
     ///
-    /// The relay module this replaces folded case on both the extension name and
-    /// its parameter names. Neither RFC 6455 section 9.1 nor RFC 7692 section 7
-    /// says how these are compared — checked, not assumed — so the leniency was
-    /// unsourced, and tungstenite's parameter parser is exact. Being lenient
-    /// about the name while it is strict about the parameters is the one
-    /// combination that is indefensible either way.
+    /// This inverts what the test asserted against the previous tungstenite: that
+    /// build folded case nowhere, so mixed case declined. The compact parser
+    /// folds it consistently — `deflate.rs` uses `eq_ignore_ascii_case` for the
+    /// extension name and for all four parameter names.
     ///
-    /// Every client sends lowercase, so nothing observable changes.
+    /// Neither RFC 6455 section 9.1 nor RFC 7692 section 7 says how these are
+    /// compared, so either policy is defensible. What is not defensible is
+    /// mixing them, and the old comment here said exactly that: lenient on the
+    /// name while strict on the parameters is the one indefensible combination.
+    /// Consistent leniency is the other coherent choice, and it is the one that
+    /// survives a client that title-cases a parameter.
+    ///
+    /// Every client sends lowercase, so nothing observable changes in practice.
     #[cfg(feature = "ws-deflate")]
     #[test]
-    fn names_are_compared_exactly() {
+    fn names_are_compared_case_insensitively() {
         for cased in [
             "PerMessage-Deflate",
             "permessage-deflate; Server_No_Context_Takeover",
         ] {
             let offered = [HeaderValue::from_str(cased).unwrap()];
             assert!(
-                negotiate_deflate(PerMessageDeflate::new(), &offered).is_none(),
-                "{cased} must not negotiate"
+                negotiate(PerMessageDeflate::new(), &offered).is_some(),
+                "{cased} must negotiate"
             );
         }
-        let exact = [HeaderValue::from_static(
-            "permessage-deflate; server_no_context_takeover",
-        )];
-        let (config, _) = negotiate_deflate(PerMessageDeflate::new(), &exact)
-            .expect("the control must negotiate, or this test proves nothing");
-        assert!(config.server_no_context_takeover);
+        // The control: an extension that is not this one still declines, so the
+        // test above is not passing merely because everything negotiates.
+        let unrelated = [HeaderValue::from_static("x-not-permessage-deflate")];
+        assert!(
+            negotiate(PerMessageDeflate::new(), &unrelated).is_none(),
+            "case-insensitive is not the same as name-blind"
+        );
     }
 
     /// An extension we know nothing about must not take the deflate offer down
@@ -1653,17 +1641,17 @@ mod tests {
     #[cfg(feature = "ws-deflate")]
     #[test]
     fn other_extensions_are_skipped_not_fatal() {
-        let with_deflate =
-            [HeaderValue::from_static("x-other-extension, permessage-deflate")];
+        let with_deflate = [HeaderValue::from_static(
+            "x-other-extension, permessage-deflate",
+        )];
         assert_eq!(
-            negotiate_deflate(PerMessageDeflate::new(), &with_deflate)
-                .expect("the deflate offer is still there")
-                .1,
+            negotiate(PerMessageDeflate::new(), &with_deflate)
+                .expect("the deflate offer is still there"),
             "permessage-deflate"
         );
 
         let without = [HeaderValue::from_static("x-other-extension")];
-        assert!(negotiate_deflate(PerMessageDeflate::new(), &without).is_none());
+        assert!(negotiate(PerMessageDeflate::new(), &without).is_none());
     }
 
     /// What Chrome and Firefox actually send.
@@ -1673,10 +1661,11 @@ mod tests {
         let offered = [HeaderValue::from_static(
             "permessage-deflate; client_max_window_bits",
         )];
-        let (config, response) =
-            negotiate_deflate(PerMessageDeflate::new(), &offered).expect("browsers must work");
-        assert_eq!(response, "permessage-deflate");
-        assert_eq!(config.client_max_window_bits().get(), 15, "nothing to narrow");
+        let response = negotiate(PerMessageDeflate::new(), &offered).expect("browsers must work");
+        assert_eq!(
+            response, "permessage-deflate",
+            "a valueless offer is accepted and not echoed, so nothing is narrowed"
+        );
     }
 
     /// A *valued* offer is echoed, and the echo is honoured -- the module this
@@ -1688,18 +1677,21 @@ mod tests {
         let offered = [HeaderValue::from_static(
             "permessage-deflate; client_max_window_bits=10",
         )];
-        let (config, response) = negotiate_deflate(PerMessageDeflate::new(), &offered).unwrap();
+        let response = negotiate(PerMessageDeflate::new(), &offered).unwrap();
+        // The echo carries the client's 10 and names no `server_max_window_bits`,
+        // so our own window is not narrowed on the wire. Coverage note: the old
+        // test also asserted the *installed* server window was still 15, which
+        // the compact API keeps private -- absence from the echo is weaker
+        // evidence than reading the setting, and that is a real loss.
         assert_eq!(response, "permessage-deflate; client_max_window_bits=10");
-        assert_eq!(config.client_max_window_bits().get(), 10);
-        assert_eq!(config.server_max_window_bits().get(), 15, "ours is untouched");
     }
 
     #[cfg(feature = "ws-deflate")]
     #[test]
     fn a_level_the_backend_rejects_declines_the_extension() {
         let offered = [HeaderValue::from_static("permessage-deflate")];
-        assert!(negotiate_deflate(PerMessageDeflate::new().level(99), &offered).is_none());
-        assert!(negotiate_deflate(PerMessageDeflate::new().level(9), &offered).is_some());
+        assert!(negotiate(PerMessageDeflate::new().level(99), &offered).is_none());
+        assert!(negotiate(PerMessageDeflate::new().level(9), &offered).is_some());
     }
 
     async fn test_echo_app<S: AsyncRead + AsyncWrite + Unpin>(

@@ -63,4 +63,9 @@ OnFailedUpdgrade = "OnFailedUpdgrade"
 # snapview/tungstenite-rs#2, open since 2017. This fork carries it so the
 # `ws` feature can negotiate the extension. Drop once it lands upstream.
 [patch.crates-io]
-tungstenite = { git = "https://github.com/odedlaz/tungstenite-rs", branch = "permessage-deflate-filing" }
+# Pinned by rev, not branch: a moving ref changes the build underneath us, and
+# the neighbouring `aws-creds` entry in buzz already pins a rev for this reason.
+# SCAFFOLD PIN, not the evidence pin. A local path builds offline against the
+# exact rev; the filing and end-to-end builds must pin
+# `rev = "<final green tungstenite SHA>"` per the agreed proof order.
+tungstenite = { path = "/private/tmp/rev-6ca591c" }
