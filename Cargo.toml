@@ -63,8 +63,6 @@ OnFailedUpdgrade = "OnFailedUpdgrade"
 # snapview/tungstenite-rs#2, open since 2017. This fork carries it so the
 # `ws` feature can negotiate the extension. Drop once it lands upstream.
 [patch.crates-io]
-# Pinned by rev, not branch: a moving ref changes the build underneath us, and
-# the neighbouring `aws-creds` entry in buzz already pins a rev for this reason.
 # Pinned by rev, never by branch: a moving ref changes the build underneath us
 # with no diff to show it, and the neighbouring `aws-creds` entry in buzz already
 # pins a rev for exactly that reason.
