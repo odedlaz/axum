@@ -68,4 +68,4 @@ OnFailedUpdgrade = "OnFailedUpdgrade"
 # SCAFFOLD PIN, not the evidence pin. A local path builds offline against the
 # exact rev; the filing and end-to-end builds must pin
 # `rev = "<final green tungstenite SHA>"` per the agreed proof order.
-tungstenite = { path = "/private/tmp/rev-6ca591c" }
+tungstenite = { path = "/private/tmp/bob-6ca591c" }
