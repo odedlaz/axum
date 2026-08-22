@@ -68,4 +68,4 @@ OnFailedUpdgrade = "OnFailedUpdgrade"
 # Pinned by rev, never by branch: a moving ref changes the build underneath us
 # with no diff to show it, and the neighbouring `aws-creds` entry in buzz already
 # pins a rev for exactly that reason.
-tungstenite = { git = "https://github.com/odedlaz/tungstenite-rs", rev = "daca14da677d7a5555df6b743ac5f333659d5e4d" }
+tungstenite = { git = "https://github.com/odedlaz/tungstenite-rs", rev = "c9c84f0725a55f47d9811bcc776e9efe7f21110a" }

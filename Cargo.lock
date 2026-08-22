@@ -5831,7 +5831,7 @@ dependencies = [
 [[package]]
 name = "tungstenite"
 version = "0.30.0"
-source = "git+https://github.com/odedlaz/tungstenite-rs?rev=daca14da677d7a5555df6b743ac5f333659d5e4d#daca14da677d7a5555df6b743ac5f333659d5e4d"
+source = "git+https://github.com/odedlaz/tungstenite-rs?rev=c9c84f0725a55f47d9811bcc776e9efe7f21110a#c9c84f0725a55f47d9811bcc776e9efe7f21110a"
 dependencies = [
  "bytes",
  "data-encoding",
