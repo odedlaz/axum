@@ -61,3 +61,12 @@ verbose_file_reads = "warn"
 # These have been fixed in the past, but are still present in the changelog.
 DefaultOnFailedUpdgrade = "DefaultOnFailedUpdgrade"
 OnFailedUpdgrade = "OnFailedUpdgrade"
+
+# permessage-deflate (RFC 7692) is unimplemented in tungstenite -- upstream issue
+# snapview/tungstenite-rs#2, open since 2017. This fork carries it so the
+# `ws` feature can negotiate the extension. Drop once it lands upstream.
+[patch.crates-io]
+# Pinned by rev, never by branch: a moving ref changes the build underneath us
+# with no diff to show it, and the neighbouring `aws-creds` entry in buzz already
+# pins a rev for exactly that reason.
+tungstenite = { git = "https://github.com/odedlaz/tungstenite-rs", rev = "c9c84f0725a55f47d9811bcc776e9efe7f21110a" }

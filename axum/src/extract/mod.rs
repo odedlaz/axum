@@ -79,6 +79,10 @@ pub use self::original_uri::OriginalUri;
 #[doc(inline)]
 pub use self::ws::WebSocketUpgrade;
 
+#[cfg(feature = "ws-deflate")]
+#[doc(inline)]
+pub use self::ws::PerMessageDeflate;
+
 // this is duplicated in `axum-extra/src/extract/form.rs`
 pub(super) fn has_content_type(headers: &HeaderMap, expected_content_type: &mime::Mime) -> bool {
     let Some(content_type) = headers.get(header::CONTENT_TYPE) else {
