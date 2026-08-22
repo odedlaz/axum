@@ -222,7 +222,7 @@ impl<F> WebSocketUpgrade<F> {
         self
     }
 
-    /// Offer to compress messages with `permessage-deflate` (RFC 7692).
+    /// Accept `permessage-deflate` negotiation (RFC 7692) on this route.
     ///
     /// Compression is per message and transparent to [`WebSocket`]: what you
     /// send and receive is uncompressed either way. The extension is negotiated
@@ -622,7 +622,7 @@ fn header_contains(headers: &HeaderMap, key: HeaderName, value: &'static str) ->
 
 /// Configuration for the `permessage-deflate` extension (RFC 7692).
 ///
-/// Passed to the upgrade to offer compression on a route.
+/// Passed to the upgrade to accept compression negotiation on a route.
 /// Compression is opt-in per route rather than a default because it costs
 /// several hundred kilobytes of per-connection state, allocated eagerly in both
 /// directions when a connection negotiates it.
@@ -1598,22 +1598,21 @@ mod tests {
         );
     }
 
-    /// One obs-text byte anywhere in the header value discards every offer in it,
-    /// including a well-formed `permessage-deflate` alongside.
+    /// An obs-text byte in an unrelated extension does not touch the deflate offer
+    /// beside it.
     ///
     /// `HeaderValue` legitimately carries bytes that are not UTF-8, and
     /// tungstenite's CHANGELOG for 0.29.0 advertises exactly that: "allow users
-    /// to send headers with non-visible ASCII values". The classifier calls
-    /// `to_str()` on the whole value, so one such byte in an *unrelated*
-    /// extension silently takes the deflate offer down with it -- the same
-    /// isolation property that is already pinned for malformed-but-UTF-8 input.
+    /// to send headers with non-visible ASCII values". Classification therefore
+    /// happens on raw bytes and per extension, so one bad byte cannot discard a
+    /// well-formed `permessage-deflate` sharing the header.
     ///
-    /// Asserts the current behaviour, which is wrong. When the classifier moves
-    /// to `as_bytes()` this flips to `is_some()` and the mutation that proves it
-    /// is restoring the `to_str()` guard.
+    /// This row asserted the opposite until the classifier moved off
+    /// whole-value `to_str()`; restoring that guard makes it fail again, which is
+    /// the mutation that proves it.
     #[cfg(feature = "ws-deflate")]
     #[test]
-    fn obs_text_in_an_unrelated_extension_currently_discards_a_clean_deflate_offer() {
+    fn obs_text_in_an_unrelated_extension_does_not_discard_a_clean_deflate_offer() {
         // A clean offer on its own negotiates -- the control, without which this
         // test cannot distinguish "obs-text broke it" from "nothing negotiates".
         let clean = [HeaderValue::from_static("x-other; q=1, permessage-deflate")];
@@ -1627,9 +1626,10 @@ mod tests {
             HeaderValue::from_bytes(b"x-other; q=\x80, permessage-deflate")
                 .expect("a valid HeaderValue -- obs-text is legal here"),
         ];
-        assert!(
-            negotiate(PerMessageDeflate::new(), &obs).is_none(),
-            "documents the defect: the clean deflate offer beside it is discarded"
+        assert_eq!(
+            negotiate(PerMessageDeflate::new(), &obs)
+                .expect("the clean deflate offer beside it must survive"),
+            "permessage-deflate"
         );
     }
 
@@ -1708,7 +1708,7 @@ mod tests {
     /// reduction the client had asked for.
     #[cfg(feature = "ws-deflate")]
     #[test]
-    fn a_valued_client_window_is_echoed_and_configured() {
+    fn a_valued_client_window_is_echoed() {
         let offered = [HeaderValue::from_static(
             "permessage-deflate; client_max_window_bits=10",
         )];
@@ -1725,8 +1725,12 @@ mod tests {
     #[test]
     fn a_level_the_backend_rejects_declines_the_extension() {
         let offered = [HeaderValue::from_static("permessage-deflate")];
+        // Both halves of the early return, so deleting either one turns this red
+        // rather than reaching a builder panic further in.
         assert!(negotiate(PerMessageDeflate::new().level(99), &offered).is_none());
+        assert!(negotiate(PerMessageDeflate::new().max_window_bits(200), &offered).is_none());
         assert!(negotiate(PerMessageDeflate::new().level(9), &offered).is_some());
+        assert!(negotiate(PerMessageDeflate::new().max_window_bits(10), &offered).is_some());
     }
 
     async fn test_echo_app<S: AsyncRead + AsyncWrite + Unpin>(
