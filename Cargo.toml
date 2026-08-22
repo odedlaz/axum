@@ -65,7 +65,7 @@ OnFailedUpdgrade = "OnFailedUpdgrade"
 [patch.crates-io]
 # Pinned by rev, not branch: a moving ref changes the build underneath us, and
 # the neighbouring `aws-creds` entry in buzz already pins a rev for this reason.
-# SCAFFOLD PIN, not the evidence pin. A local path builds offline against the
-# exact rev; the filing and end-to-end builds must pin
-# `rev = "<final green tungstenite SHA>"` per the agreed proof order.
-tungstenite = { path = "/private/tmp/bob-daca14d" }
+# Pinned by rev, never by branch: a moving ref changes the build underneath us
+# with no diff to show it, and the neighbouring `aws-creds` entry in buzz already
+# pins a rev for exactly that reason.
+tungstenite = { git = "https://github.com/odedlaz/tungstenite-rs", rev = "daca14da677d7a5555df6b743ac5f333659d5e4d" }
